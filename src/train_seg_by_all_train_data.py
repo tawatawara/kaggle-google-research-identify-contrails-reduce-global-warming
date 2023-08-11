@@ -29,7 +29,7 @@ def get_data(cfg: Config):
         train = train.query("is_contrail_exist == 1")
         valid = valid.query("is_contrail_exist == 1")
 
-    train_mask_file_name = cfg["train_mask_file_name"]
+    train_mask_file_name = cfg["/globals/train_mask_file_name"]
 
     train_img_paths = []
     train_mask_paths = []
