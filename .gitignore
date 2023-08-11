@@ -1,2 +1,5 @@
 *.whl
 *.lock
+__pycache__/
+*.py[cod]
+*$py.class
