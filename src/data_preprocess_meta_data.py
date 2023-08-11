@@ -24,7 +24,7 @@ def create_mask_data(folder):
         n_pixels = mask.sum()
     
         row_dict_list.append({
-            "flag": folder,
+            "folder": folder,
             "record_id": record_id,
             "n_contrail_pixels": n_pixels
         })
