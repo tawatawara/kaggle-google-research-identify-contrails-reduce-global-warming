@@ -1,0 +1,166 @@
+globals:
+  # # path
+  output_root:
+    type  : str_format
+    target: "../output/exp{0:0>3}/{1}_{2}_unet_{3}"
+    args  : [57, 8, "@/model/encoder_name", "@/globals/img_size"]
+  output_path: "@/globals/output_root"
+  # # data
+  img_size: 384
+  use_only_pos: False
+  train_mask_file_name: human_pixel_masks_soft.npy
+  
+  # # Other
+  grad_accum  : 1
+  max_epoch   : 100
+  eval_trigger: [1, epoch]
+  seed         : 1086
+  deterministic: True
+  enable_amp: True
+  device: {type: torch_device, device: cuda:0}
+
+model:
+  type      : Unet
+  encoder_name: tu-regnetz_d32
+  encoder_weights: imagenet
+  in_channels: 11
+
+dataset:
+  img_size: [256, 256]  # (height, width)
+  train:
+    type     : GRICRGWLazyDataset
+    image_paths: null
+    mask_paths : null
+    transform:
+      type      : Compose
+      transforms:
+        - {type: HorizontalFlip   , p: 0.5}
+        - {type: VerticalFlip     , p: 0.5}
+        - {type: ShiftScaleRotate , p: 0.5,
+            rotate_limit: 90}
+        - {type: RandomResizedCrop, p: 1.0,
+            scale: [0.875, 1.0], height: "@/dataset/img_size/0", width: "@/dataset/img_size/1"}
+        - {type: Normalize        , p: 1.0,
+          mean: [ -2.7986, 0.9446, 233.6702, 242.2449, 250.7397, 274.4096, 255.5284, 276.5997, 275.3542, 272.5556, 260.4157],
+          std : [  1.2727, 2.1788,   7.0210,   9.1716,  11.3542,  19.6210,  13.1217,  20.7206,  21.1159,  20.5739,  15.8393],
+          max_pixel_value: 1}
+        - {type: ToTensorV2       , p: 1.0, transpose_mask: True}
+  val:
+    type     : GRICRGWLazyDataset
+    image_paths: null
+    mask_paths : null
+    transform:
+      type      : Compose
+      transforms:
+        - {type: Normalize        , p: 1.0,
+          mean: [ -2.7986, 0.9446, 233.6702, 242.2449, 250.7397, 274.4096, 255.5284, 276.5997, 275.3542, 272.5556, 260.4157],
+          std : [  1.2727, 2.1788,   7.0210,   9.1716,  11.3542,  19.6210,  13.1217,  20.7206,  21.1159,  20.5739,  15.8393],
+          max_pixel_value: 1}
+        - {type: ToTensorV2, p: 1.0, transpose_mask: True}
+  test:
+    type     : GRICRGWLazyDataset
+    image_paths: null
+    mask_paths : null
+    transform:
+      type      : Compose
+      transforms:
+        - {type: Normalize        , p: 1.0,
+          mean: [ -2.7986, 0.9446, 233.6702, 242.2449, 250.7397, 274.4096, 255.5284, 276.5997, 275.3542, 272.5556, 260.4157],
+          std : [  1.2727, 2.1788,   7.0210,   9.1716,  11.3542,  19.6210,  13.1217,  20.7206,  21.1159,  20.5739,  15.8393],
+          max_pixel_value: 1}
+        - {type: ToTensorV2, p: 1.0, transpose_mask: True}
+
+loader:
+  train: {type: DataLoader, dataset: "@/dataset/train",
+    batch_size: {type: "__floordiv__", x0: 32, x1: "@/globals/grad_accum"},
+    num_workers: 12, shuffle: True, drop_last: True}
+  val:   {type: DataLoader, dataset: "@/dataset/val"  ,
+    batch_size: {type: "__mul__", x0: "@../../train/batch_size", x1: 2},
+    num_workers: 12, shuffle: False, drop_last: False}
+  test:  {type: DataLoader, dataset: "@/dataset/test" ,
+    batch_size: "@../val/batch_size",
+    num_workers: 12, shuffle: False, drop_last: False}
+
+optimizer:
+  type    : AdamW
+  params  : {type: method_call, obj: "@/model", method: parameters}
+  lr            : 3.0e-03
+  weight_decay  : 1.0e-02
+
+grad_scaler:
+  type   : GradScaler
+  enabled: "@/globals/enable_amp"
+
+# model_ema: null
+model_ema:
+  type  : ModelEmaV2
+  model : "@/model"
+  decay : 0.9999
+  device: "@/globals/device" 
+
+scheduler:
+  type     : OneCycleLR
+  optimizer: "@/optimizer"
+  epochs   : "@/globals/max_epoch"
+  pct_start: {type: __div__, x0: 5, x1: "@/globals/max_epoch"}
+  steps_per_epoch: {type: __len__, obj: "@/loader/train"}
+  max_lr          : "@/optimizer/lr"
+  div_factor      : 25
+  final_div_factor: 4.0e-01
+
+loss:
+  type : BCEandDiceLossWithLogits
+  alpha: 0.1
+
+eval:
+  - type       : micro_average
+    report_name: loss
+    metric_func:
+      type: BCEandDiceLossWithLogits
+      alpha: 0.1
+  - type       : PercentileGlobalDiceCoefficientWithLogitsForPPE
+    report_name: val/metric
+    percent    : 0.9982
+
+evaluator:
+  type        : Evaluator
+  iterator    : "@/loader/val"
+  target      : "@/model"
+  metrics     : "@/eval"
+  progress_bar: True
+
+manager:
+  type      : ExtensionsManager
+  models    : "@/model"
+  optimizers: "@/optimizer"
+  out_dir   : "@/globals/output_path"
+  max_epochs     : "@/globals/max_epoch"
+  iters_per_epoch: {type: __len__, obj: "@/loader/train"}
+  stop_trigger   : null
+  # stop_trigger   : {
+  #   type: EarlyStoppingTrigger,
+  #   monitor: val/loss, mode: min, patience: 10, verbose: true,
+  #   check_trigger: "@/globals/eval_trigger",
+  #   max_trigger  : ["@/globals/max_epoch", epoch]}
+  extensions:
+    # # log
+    - {type: observe_lr, optimizer: "@/optimizer"}
+    - {type: LogReport}
+    - {type: PlotReport, y_keys: lr, x_key: epoch, filename: lr.png}
+    - {type: PlotReport, y_keys: [train/loss, val/loss], x_key: epoch, filename: loss.png}
+    - {type: PlotReport,
+      y_keys: [val/metric,],
+      x_key: epoch, filename: metric.png}
+    - {type: PrintReport, entries: [
+        epoch, iteration, lr, train/loss, val/loss, val/metric, elapsed_time]}
+    - {type: ProgressBar, update_interval: 20}
+    # # lr scheduler
+    - type: LRScheduler
+      scheduler: "@/scheduler"
+      trigger: [1, iteration]
+
+extensions_with_trigger:
+  - - {type: snapshot, target: "@/model", filename: "snapshot_epoch_{.epoch}.pth"}
+    - {type: MaxValueTrigger, key: val/metric, trigger: "@/globals/eval_trigger"}
+  - - "@/evaluator"
+    - "@/globals/eval_trigger"
